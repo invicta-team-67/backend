@@ -185,9 +185,7 @@ app.post("/generate-confirmation", authenticate, async (req, res) => {
       return res.status(404).json({ error: "Transaction not found" });
     }
 
-    // NOTE: Ownership check disabled for now because current `sme_id` mapping
-    // in existing rows does not match authenticated `user_id`.
-    // Re-enable once transaction ownership model is finalized.
+   
 
     const nonce = crypto.randomBytes(32).toString("hex"); //generates random 32 byte nonce as hex string
 
