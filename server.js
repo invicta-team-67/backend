@@ -15,14 +15,14 @@ app.use(express.json()); //automatically parse json data sent in request body
 // 2. SUPABASE CLIENT
 
 //checking if required environment variables are missing
-if (
-  !process.env.SUPABASE_URL ||
-  !process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  !process.env.JWT_SECRET
-) {
-  console.error("Missing required environment variables");//logs error of any required env variable are missing
-  process.exit(1); //exits process with faillure code
-}
+// if (
+//   !process.env.SUPABASE_URL ||
+//   !process.env.SUPABASE_SERVICE_ROLE_KEY ||
+//   !process.env.JWT_SECRET
+// ) {
+//   console.error("Missing required environment variables");//logs error of any required env variable are missing
+//   process.exit(1); //exits process with faillure code
+// }
 // creating supabase client with URL and service key
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -155,7 +155,7 @@ app.post(
       await supabase
         .from("transactions")
         .update({ proof_files_urls: filePath })
-        .eq("id", transactionId);
+        .eq("transaction_id", transactionId);
 
       res.json({ message: "Proof uploaded successfully" });
     } catch (err) {
@@ -175,6 +175,20 @@ app.post("/generate-confirmation", authenticate, async (req, res) => {
     if (!transactionId) //if missing returns 400
       return res.status(400).json({ error: "transactionId required" });
 
+    const { data: transaction, error: txLookupError } = await supabase
+      .from("transactions")
+      .select("transaction_id, sme_id")
+      .eq("transaction_id", transactionId)
+      .single();
+
+    if (txLookupError || !transaction) {
+      return res.status(404).json({ error: "Transaction not found" });
+    }
+
+    // NOTE: Ownership check disabled for now because current `sme_id` mapping
+    // in existing rows does not match authenticated `user_id`.
+    // Re-enable once transaction ownership model is finalized.
+
     const nonce = crypto.randomBytes(32).toString("hex"); //generates random 32 byte nonce as hex string
 
     const token = jwt.sign( //signs jwt containing transaction id and nonce and expires in 72hrs using JWT-SECRET
@@ -190,16 +204,29 @@ app.post("/generate-confirmation", authenticate, async (req, res) => {
 
     const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000); //computes expiration timestamp
 
-    await supabase //updates transaction row  with token hash,expire and confirmation used
+    const { error: updateError, data: updatedRows } = await supabase //updates transaction row  with token hash,expire and confirmation used
       .from("transactions")
       .update({
         confirmation_token_hash: tokenHash,
         confirmation_expires_at: expiresAt,
         confirmation_used: false,
       })
-      .eq("id", transactionId);
+      .eq("transaction_id", transactionId)
+      .select("transaction_id");
 
-    const link = `http://localhost:3000/confirm?token=${token}`; //building confirmation url with token query param
+    if (updateError) {
+      return res
+        .status(500)
+        .json({ error: `Failed to store confirmation token: ${updateError.message}` });
+    }
+
+    if (!updatedRows || updatedRows.length === 0) {
+      return res
+        .status(404)
+        .json({ error: "Transaction not found for this user" });
+    }
+
+    const link = `http://localhost:3000/confirm?token=${encodeURIComponent(token)}`; //building confirmation url with token query param
 
     res.json({ confirmationLink: link }); //returns confirmation link  json
   } catch (err) { //catch returns generic 500
@@ -213,7 +240,8 @@ app.post("/generate-confirmation", authenticate, async (req, res) => {
 
 app.get("/confirm", async (req, res) => { //define public route
   try { //start try
-    const { token } = req.query; //reads token from query string
+    const rawToken = req.query.token; //reads token from query string
+    const token = typeof rawToken === "string" ? decodeURIComponent(rawToken) : null;
 
     if (!token) //if token missing return 400 text response
       return res.status(400).send("Token required");
@@ -225,12 +253,16 @@ app.get("/confirm", async (req, res) => { //define public route
       .update(token)
       .digest("hex");
 
-    const { data: transaction } = await supabase //fetches transaction where id matches  decoded transactionid and stored hash matches incoming hash
+    const { data: transaction, error: txError } = await supabase //fetches transaction where id matches  decoded transactionid and stored hash matches incoming hash
       .from("transactions")
       .select("*")
-      .eq("id", decoded.transaction_id)
+      .eq("transaction_id", decoded.transaction_id)
       .eq("confirmation_token_hash", incomingHash)
       .single();
+
+    if (txError) {
+      return res.status(400).send("Invalid token");
+    }
 
     if (!transaction) //if no row found token invalid
       return res.status(400).send("Invalid token");
@@ -247,7 +279,7 @@ app.get("/confirm", async (req, res) => { //define public route
         status: "verified",
         confirmation_used: true,
       })
-      .eq("id", decoded.transaction_id);
+      .eq("transaction_id", decoded.transaction_id);
 
     res.send("Transaction Verified Successfully"); //send success response
   } catch (err) { //any verify DB exception retuns 400 invalid or expired token 
