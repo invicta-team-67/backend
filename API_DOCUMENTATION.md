@@ -1,5 +1,7 @@
 # TrustBridge Backend API Documentation
+Secure  API for business transaction verification with proof upload capabilities. Built with Express.js, Supabase, and JWT authentication
 
+All protected endpoints require a Bearer token in the Authorization header:
 ## Base URL
 - Local: `http://localhost:3000`
 - Production: `https://backend-jtvn.onrender.com`
@@ -19,6 +21,7 @@
 ## Endpoints
 
 ### 1. Get Report Data
+Retrieves business profile and verified transaction statistics for the authenticated user.
 - Method: `GET`
 - Path: `/report-data`
 - Auth: Required
@@ -116,6 +119,7 @@ Common errors:
 - `500` Failed to store token/server error
 
 ### 4. Confirm Transaction
+Public endpoint to verify a transaction using a confirmation token. Typically accessed via email link.
 - Method: `GET`
 - Path: `/confirm`
 - Auth: Not required
@@ -151,6 +155,7 @@ curl -X GET "https://backend-jtvn.onrender.com/report-data" \
 ```
 
 ### Upload proof
+Uploads verification documentation for a specific transaction
 ```bash
 curl -X POST "https://backend-jtvn.onrender.com/upload-proof" \
   -H "Authorization: Bearer <supabase_access_token>" \
@@ -159,9 +164,17 @@ curl -X POST "https://backend-jtvn.onrender.com/upload-proof" \
 ```
 
 ### Generate confirmation link
+Creates a secure, time-limited confirmation token for transaction verification
 ```bash
 curl -X POST "https://backend-jtvn.onrender.com/generate-confirmation" \
   -H "Authorization: Bearer <supabase_access_token>" \
   -H "Content-Type: application/json" \
   -d '{"transactionId":"txn_123"}'
 ```
+### dependencies
+express - Web framework
+@supabase/supabase-js - Database client
+jsonwebtoken - JWT signing/verification
+multer - File upload handling
+crypto - Random bytes and hashing (Node.js native)
+dotenv - Environment variable management
