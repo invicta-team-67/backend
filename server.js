@@ -104,17 +104,17 @@ app.get("/report-data", authenticate, async (req, res) => { //defining GET prote
     const { data: business, error: profileError } = await supabase //queries profile table and expects one row
       .from("profiles")
       .select("*")
-      .eq("user_id", userId)
+      .eq("id", userId)
       .single();
 
     if (profileError) //if profile query fails,return 500 with DB error message
       return res.status(500).json({ error: profileError.message });
 
     // Fetch verified transactions
-    const { data: transactions, error: txError } = await supabase //queries transaction with selected columns filtered by sme-d and status verified
+    const { data: transactions, error: txError } = await supabase //queries transactions filtered by user_id and verified status
       .from("transactions")
       .select("amount, created_at, status")
-      .eq("sme_id", userId)
+      .eq("user_id", userId)
       .eq("status", "verified");
 
     if (txError) //if transaction fails, return 500
@@ -164,7 +164,7 @@ app.post(
       // Lookup transaction owner to enforce tenant isolation.
       const { data: transaction, error: txLookupError } = await supabase
         .from("transactions")
-        .select("transaction_id, sme_id")
+        .select("transaction_id, user_id")
         .eq("transaction_id", transactionId)
         .single();
 
@@ -172,8 +172,8 @@ app.post(
         return res.status(404).json({ error: "Transaction not found" });
       }
 
-      // Only the SME who owns this transaction can upload proof for it.
-      if (transaction.sme_id !== req.user.id) {
+      // Only the authenticated owner of this transaction can upload proof for it.
+      if (transaction.user_id !== req.user.id) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -213,10 +213,10 @@ app.post("/generate-confirmation", authenticate, async (req, res) => {
     if (!transactionId) //if missing returns 400
       return res.status(400).json({ error: "transactionId required" });
 
-    // Read owner (sme_id) so we can authorize confirmation-token generation.
+    // Read owner (user_id) so we can authorize confirmation-token generation.
     const { data: transaction, error: txLookupError } = await supabase
       .from("transactions")
-      .select("transaction_id, sme_id")
+      .select("transaction_id, user_id")
       .eq("transaction_id", transactionId)
       .single();
 
@@ -224,8 +224,8 @@ app.post("/generate-confirmation", authenticate, async (req, res) => {
       return res.status(404).json({ error: "Transaction not found" });
     }
 
-    // Critical ownership check: prevent one SME generating tokens for another SME's transaction.
-    if (transaction.sme_id !== req.user.id) {
+    // Critical ownership check: prevent one user generating tokens for another user's transaction.
+    if (transaction.user_id !== req.user.id) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
