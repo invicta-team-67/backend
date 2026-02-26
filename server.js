@@ -15,14 +15,22 @@ app.use(express.json()); //automatically parse json data sent in request body
 // 2. SUPABASE CLIENT
 
 //checking if required environment variables are missing
-// if (
-//   !process.env.SUPABASE_URL ||
-//   !process.env.SUPABASE_SERVICE_ROLE_KEY ||
-//   !process.env.JWT_SECRET
-// ) {
-//   console.error("Missing required environment variables");//logs error of any required env variable are missing
-//   process.exit(1); //exits process with faillure code
-// }
+if (
+  !process.env.SUPABASE_URL ||
+  !process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  !process.env.JWT_SECRET ||
+  !process.env.CONFIRM_BASE_URL
+) {
+  // Fail fast at boot if any critical secret/config is missing.
+  console.error("Missing required environment variables");//logs error of any required env variable are missing
+  process.exit(1); //exits process with faillure code
+}
+
+// Force HTTPS for confirmation links so tokens are never sent over plain HTTP.
+if (!process.env.CONFIRM_BASE_URL.startsWith("https://")) {
+  console.error("CONFIRM_BASE_URL must start with https://");
+  process.exit(1);
+}
 // creating supabase client with URL and service key
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -34,7 +42,21 @@ const supabase = createClient(
 
 
 // configuring multer to store uploaded file in memory 
-const upload = multer({ storage: multer.memoryStorage() });
+// Explicit file-type allowlist to block unexpected or malicious uploads.
+const ALLOWED_MIME_TYPES = ["application/pdf", "image/jpeg", "image/png"];
+const upload = multer({
+  storage: multer.memoryStorage(),
+  // Cap file size at 5MB to reduce abuse and memory pressure.
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter(req, file, cb) {
+    // Reject any MIME type outside our allowlist.
+    if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+      return cb(new Error("Invalid file type. Only PDF, JPEG, and PNG are allowed."));
+    }
+    // Accept file when MIME type is allowed.
+    cb(null, true);
+  },
+});
 
 
 // 4. AUTH MIDDLEWARE
@@ -139,6 +161,22 @@ app.post(
           .json({ error: "transactionId and file are required" });
       }
 
+      // Lookup transaction owner to enforce tenant isolation.
+      const { data: transaction, error: txLookupError } = await supabase
+        .from("transactions")
+        .select("transaction_id, sme_id")
+        .eq("transaction_id", transactionId)
+        .single();
+
+      if (txLookupError || !transaction) {
+        return res.status(404).json({ error: "Transaction not found" });
+      }
+
+      // Only the SME who owns this transaction can upload proof for it.
+      if (transaction.sme_id !== req.user.id) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
       const filePath = `${transactionId}/${Date.now()}-${ //building storage path
         file.originalname
       }`;
@@ -175,6 +213,7 @@ app.post("/generate-confirmation", authenticate, async (req, res) => {
     if (!transactionId) //if missing returns 400
       return res.status(400).json({ error: "transactionId required" });
 
+    // Read owner (sme_id) so we can authorize confirmation-token generation.
     const { data: transaction, error: txLookupError } = await supabase
       .from("transactions")
       .select("transaction_id, sme_id")
@@ -185,14 +224,21 @@ app.post("/generate-confirmation", authenticate, async (req, res) => {
       return res.status(404).json({ error: "Transaction not found" });
     }
 
-   
+    // Critical ownership check: prevent one SME generating tokens for another SME's transaction.
+    if (transaction.sme_id !== req.user.id) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
 
     const nonce = crypto.randomBytes(32).toString("hex"); //generates random 32 byte nonce as hex string
 
     const token = jwt.sign( //signs jwt containing transaction id and nonce and expires in 72hrs using JWT-SECRET
       { transaction_id: transactionId, nonce },
       process.env.JWT_SECRET,
-      { expiresIn: "72h" }
+      {
+        expiresIn: "72h",
+        // Pin signing algorithm explicitly to avoid algorithm confusion or downgrade behavior.
+        algorithm: "HS256",
+      }
     );
 
     const tokenHash = crypto //Hashes the JWT using SHA-256(stores hash,not raw token)
@@ -224,7 +270,8 @@ app.post("/generate-confirmation", authenticate, async (req, res) => {
         .json({ error: "Transaction not found for this user" });
     }
 
-    const link = `http://localhost:3000/confirm?token=${encodeURIComponent(token)}`; //building confirmation url with token query param
+    // Build external confirmation URL from env so production uses HTTPS domain, not localhost HTTP.
+    const link = `${process.env.CONFIRM_BASE_URL}/confirm?token=${encodeURIComponent(token)}`; //building confirmation url with token query param
 
     res.json({ confirmationLink: link }); //returns confirmation link  json
   } catch (err) { //catch returns generic 500
@@ -244,7 +291,10 @@ app.get("/confirm", async (req, res) => { //define public route
     if (!token) //if token missing return 400 text response
       return res.status(400).send("Token required");
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET); //verifies JWT signature + expiry with JWT SECRET decodes payload
+    // During verification, only accept HS256-signed tokens.
+    const decoded = jwt.verify(token, process.env.JWT_SECRET, {
+      algorithms: ["HS256"],
+    }); //verifies JWT signature + expiry with JWT SECRET decodes payload
 
     const incomingHash = crypto //hashes incoming token for DB comparison
       .createHash("sha256")
@@ -289,7 +339,24 @@ app.get("/confirm", async (req, res) => { //define public route
 // 9. START SERVER
 
 
-const PORT = 3000; //sends to port 3000
+app.use((err, req, res, next) => {
+  // Handle multer-specific upload errors with user-friendly 400 responses.
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({ error: "File too large. Max size is 5MB." });
+    }
+    return res.status(400).json({ error: err.message });
+  }
+
+  // Handle non-multer upload validation errors like invalid MIME type
+  if (err) {
+    return res.status(400).json({ error: err.message || "Invalid file upload" });
+  }
+
+  next();
+});
+
+const PORT = process.env.PORT || 3000; //use Render-assigned port in production, fallback locally
 app.listen(PORT, () => { //starts express server
   console.log(`Server running on port ${PORT}`);
 });
