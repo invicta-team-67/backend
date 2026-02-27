@@ -1,37 +1,28 @@
-name: Deploy Backend
+name: Backend CI/CD
 
 on:
   push:
     branches:
-      - main
+      - devops
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v4
 
     - name: Set up Node.js
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v4
       with:
-        node-version: '18'
+        node-version: 18
 
-    - name: Install Dependencies
+    - name: Install dependencies
       run: npm install
 
-    - name: Run Lint or Tests
-      run: npm test # add tests later
+    - name: Build Docker image
+      run: |
+        docker build -t backend-app -f docker/Dockerfile .
 
-    - name: Build & Push Docker Image
-      uses: docker/build-push-action@v4
-      with:
-        push: true
-        tags: yourdockerhubname/backend-app:latest
-
-    - name: Deploy to Kubernetes
-      uses: azure/k8s-deploy@v3 # or another provider action
-      with:
-        manifests: |
-          k8s/deployment.yaml
-          k8s/service.yaml
+    # Push + deploy steps come next (after registry + k8s setup)
